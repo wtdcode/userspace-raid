@@ -9,8 +9,10 @@
 
 #![deny(missing_docs)]
 use std::fs::File;
+use std::future::Future;
 use std::io::{self, prelude::*};
 use std::os::unix::fs::FileExt;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use tokio::net::TcpListener;
@@ -18,7 +20,7 @@ use tokio::net::TcpListener;
 use color_eyre::eyre::{bail, WrapErr};
 use color_eyre::Result;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::nbd::proto::*;
 
@@ -30,34 +32,52 @@ use crate::nbd::proto::*;
 /// array.
 pub trait Blocks {
     /// Fill buf starting from off (reading `buf.len()` bytes)
-    fn read_at(&self, buf: &mut [u8], off: u64) -> io::Result<()>;
+    fn read_at<'a>(
+        &'a self,
+        buf: &'a mut [u8],
+        off: u64,
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>;
 
     /// Write data from buf to self starting at off (writing `buf.len()` bytes)
-    fn write_at(&self, buf: &[u8], off: u64) -> io::Result<()>;
+    fn write_at<'a>(
+        &'a self,
+        buf: &'a [u8],
+        off: u64,
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>;
 
     /// Get the size of this array (in bytes)
-    fn size(&self) -> io::Result<u64>;
+    fn size(&self) -> Pin<Box<dyn Future<Output = io::Result<u64>> + Send + '_>>;
 
     /// Flush any outstanding writes to stable storage.
-    fn flush(&self) -> io::Result<()>;
+    fn flush(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>;
 }
 
 impl Blocks for File {
-    fn read_at(&self, buf: &mut [u8], off: u64) -> io::Result<()> {
-        FileExt::read_exact_at(self, buf, off)
+    fn read_at<'a>(
+        &'a self,
+        buf: &'a mut [u8],
+        off: u64,
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async move { FileExt::read_exact_at(self, buf, off) })
     }
 
-    fn write_at(&self, buf: &[u8], off: u64) -> io::Result<()> {
-        FileExt::write_all_at(self, buf, off)
+    fn write_at<'a>(
+        &'a self,
+        buf: &'a [u8],
+        off: u64,
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async move { FileExt::write_all_at(self, buf, off) })
     }
 
-    fn size(&self) -> io::Result<u64> {
-        self.metadata().map(|m| m.len())
+    fn size(&self) -> Pin<Box<dyn Future<Output = io::Result<u64>> + Send + '_>> {
+        Box::pin(async move { self.metadata().map(|m| m.len()) })
     }
 
-    fn flush(&self) -> io::Result<()> {
-        self.sync_all()?;
-        Ok(())
+    fn flush(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async move {
+            self.sync_all()?;
+            Ok(())
+        })
     }
 }
 
@@ -74,39 +94,53 @@ impl MemBlocks {
 }
 
 impl Blocks for MemBlocks {
-    fn read_at(&self, buf: &mut [u8], off: u64) -> io::Result<()> {
-        let data = self.0.lock().unwrap();
-        let off = off as usize;
-        if off + buf.len() > data.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "out-of-bounds read",
-            ));
-        }
-        buf.copy_from_slice(&data[off..off + buf.len()]);
-        Ok(())
+    fn read_at<'a>(
+        &'a self,
+        buf: &'a mut [u8],
+        off: u64,
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async move {
+            let data = self.0.lock().unwrap();
+            let off = off as usize;
+            if off + buf.len() > data.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "out-of-bounds read",
+                ));
+            }
+            buf.copy_from_slice(&data[off..off + buf.len()]);
+            Ok(())
+        })
     }
 
-    fn write_at(&self, buf: &[u8], off: u64) -> io::Result<()> {
-        let mut data = self.0.lock().unwrap();
-        let off = off as usize;
-        if off + buf.len() > data.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "out-of-bounds write",
-            ));
-        }
-        data[off..off + buf.len()].copy_from_slice(buf);
-        Ok(())
+    fn write_at<'a>(
+        &'a self,
+        buf: &'a [u8],
+        off: u64,
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async move {
+            let mut data = self.0.lock().unwrap();
+            let off = off as usize;
+            if off + buf.len() > data.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "out-of-bounds write",
+                ));
+            }
+            data[off..off + buf.len()].copy_from_slice(buf);
+            Ok(())
+        })
     }
 
-    fn size(&self) -> io::Result<u64> {
-        let data = self.0.lock().unwrap();
-        Ok(data.len() as u64)
+    fn size(&self) -> Pin<Box<dyn Future<Output = io::Result<u64>> + Send + '_>> {
+        Box::pin(async move {
+            let data = self.0.lock().unwrap();
+            Ok(data.len() as u64)
+        })
     }
 
-    fn flush(&self) -> io::Result<()> {
-        Ok(())
+    fn flush(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async move { Ok(()) })
     }
 }
 
@@ -116,18 +150,18 @@ mod tests {
 
     use super::{Blocks, MemBlocks};
 
-    #[test]
-    fn test_mem_blocks() -> Result<()> {
+    #[tokio::test]
+    async fn test_mem_blocks() -> Result<()> {
         let data = vec![1u8; 10];
         let file = MemBlocks::new(data);
 
         let mut buf = [0u8; 3];
-        file.read_at(&mut buf, 7)?;
+        file.read_at(&mut buf, 7).await?;
         assert_eq!(buf, [1, 1, 1]);
 
-        file.write_at(&[3, 4], 8)?;
+        file.write_at(&[3, 4], 8).await?;
 
-        file.read_at(&mut buf, 7)?;
+        file.read_at(&mut buf, 7).await?;
         assert_eq!(buf, [1, 3, 4]);
         Ok(())
     }
@@ -135,9 +169,9 @@ mod tests {
 
 /// Wrap a Blocks and implement the core NBD operations using its operations.
 #[derive(Debug)]
-struct Export<F: Blocks>(F);
+struct Export<F: Blocks + Send>(F);
 
-impl<F: Blocks> Export<F> {
+impl<F: Blocks + Send> Export<F> {
     /// Name returns the name of the single, default export, for listing purposes.
     ///
     /// The server ignores all export names anyway so this name is not important.
@@ -145,7 +179,7 @@ impl<F: Blocks> Export<F> {
         "default".to_string()
     }
 
-    fn read<'a>(
+    async fn read<'a>(
         &self,
         off: u64,
         len: u32,
@@ -153,40 +187,49 @@ impl<F: Blocks> Export<F> {
     ) -> core::result::Result<&'a mut [u8], ErrorType> {
         let len = len as usize;
         if buf.len() < len {
+            debug!(buflen=buf.len(), len, "Overflow in export reading");
             return Err(ErrorType::EOVERFLOW);
         }
         let buf = &mut buf[..len];
-        match Blocks::read_at(&self.0, buf, off) {
+        match Blocks::read_at(&self.0, buf, off).await {
             Ok(_) => Ok(buf),
             Err(err) => Err(ErrorType::from_io_kind(err.kind())),
         }
     }
 
-    fn write(&self, off: u64, len: usize, data: &[u8]) -> core::result::Result<(), ErrorType> {
+    async fn write(
+        &self,
+        off: u64,
+        len: usize,
+        data: &[u8],
+    ) -> core::result::Result<(), ErrorType> {
         if len > data.len() {
+            debug!(datalen=data.len(), len, "Overflow in export writing");
             return Err(ErrorType::EOVERFLOW);
         }
         let data = &data[..len];
-        Blocks::write_at(&self.0, data, off).map_err(|err| ErrorType::from_io_kind(err.kind()))?;
+        Blocks::write_at(&self.0, data, off)
+            .await
+            .map_err(|err| ErrorType::from_io_kind(err.kind()))?;
         Ok(())
     }
 
-    fn flush(&self) -> io::Result<()> {
-        self.0.flush()?;
+    async fn flush(&self) -> io::Result<()> {
+        self.0.flush().await?;
         Ok(())
     }
 
-    fn size(&self) -> io::Result<u64> {
-        self.0.size()
+    async fn size(&self) -> io::Result<u64> {
+        self.0.size().await
     }
 }
 
 #[derive(Debug)]
-struct ServerInner<F: Blocks> {
+struct ServerInner<F: Blocks + Send> {
     export: Export<F>,
 }
 
-impl<F: Blocks> ServerInner<F> {
+impl<F: Blocks + Send> ServerInner<F> {
     // fake constant for the server's supported operations
     #[allow(non_snake_case)]
     fn TRANSMIT_FLAGS() -> TransmitFlags {
@@ -235,7 +278,7 @@ impl<F: Blocks> ServerInner<F> {
         // S: 64 bits, size of the export in bytes (unsigned)
         // S: 16 bits, transmission flags
         // S: 124 bytes, zeroes (reserved) (unless `NBD_FLAG_C_NO_ZEROES` was negotiated by the client)
-        stream.write_u64(self.export.size()?).await?;
+        stream.write_u64(self.export.size().await?).await?;
         let transmit = Self::TRANSMIT_FLAGS();
         stream.write_u16(transmit.bits()).await?;
         if !flags.contains(HandshakeFlags::NO_ZEROES) {
@@ -267,7 +310,7 @@ impl<F: Blocks> ServerInner<F> {
                     // - 16 bits, transmission flags
                     let mut buf = vec![];
                     buf.write_u16(InfoType::EXPORT.into()).await?;
-                    buf.write_u64(self.export.size()?).await?;
+                    buf.write_u64(self.export.size().await?).await?;
                     buf.write_u16(Self::TRANSMIT_FLAGS().bits()).await?;
                     OptReply::new(opt_typ, ReplyType::INFO, buf)
                         .put(stream)
@@ -380,17 +423,17 @@ impl<F: Blocks> ServerInner<F> {
                 continue;
             }
             match req.typ {
-                Cmd::READ => match export.read(req.offset, req.len, &mut buf) {
+                Cmd::READ => match export.read(req.offset, req.len, &mut buf).await {
                     Ok(data) => SimpleReply::data(&req, data).put(stream).await?,
                     Err(err) => {
                         warn!(target: "nbd", "read error {:?}", err);
                         SimpleReply::err(err, &req).put(stream).await?;
                     }
                 },
-                Cmd::WRITE => match export.write(req.offset, req.data_len, &buf) {
+                Cmd::WRITE => match export.write(req.offset, req.data_len, &buf).await {
                     Ok(_) => {
                         if req.flags.contains(CmdFlags::FUA) {
-                            export.flush()?;
+                            export.flush().await?;
                         }
                         SimpleReply::ok(&req).put(stream).await?;
                     }
@@ -405,7 +448,7 @@ impl<F: Blocks> ServerInner<F> {
                     return Ok(());
                 }
                 Cmd::FLUSH => {
-                    export.flush()?;
+                    export.flush().await?;
                     SimpleReply::ok(&req).put(stream).await?;
                 }
                 Cmd::TRIM => {
@@ -456,7 +499,7 @@ impl<F: Blocks> ServerInner<F> {
 
 /// Server implements the NBD protocol, with a single export.
 #[derive(Debug)]
-pub struct Server<F: Blocks>(Arc<ServerInner<F>>);
+pub struct Server<F: Blocks + Send>(Arc<ServerInner<F>>);
 
 impl<F: Blocks + Sync + Send + 'static> Server<F> {
     /// Create a Server that exports blocks.
@@ -476,9 +519,7 @@ impl<F: Blocks + Sync + Send + 'static> Server<F> {
     }
 
     /// Start accepting connections from clients and processing commands.
-    pub async fn start(self) -> Result<()> {
-        let addr = ("127.0.0.1", TCP_PORT);
-        let listener = TcpListener::bind(addr).await?;
+    pub async fn start(self, listener: TcpListener) -> Result<()> {
         loop {
             let (stream, _) = listener.accept().await?;
             stream.set_nodelay(true)?;

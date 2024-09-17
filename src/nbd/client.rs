@@ -8,11 +8,18 @@ use color_eyre::Result;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
+    runtime::Handle,
+    sync::{Mutex, RwLock},
 };
 
 use std::{
+    borrow::BorrowMut,
     io::prelude::*,
-    os::unix::io::{IntoRawFd, RawFd},
+    os::{
+        fd::AsRawFd,
+        unix::io::{IntoRawFd, RawFd},
+    },
+    sync::Arc,
 };
 
 use byteorder::{ReadBytesExt, WriteBytesExt, BE};
@@ -27,7 +34,7 @@ struct Export {
 /// Client provides an interface to an export from a remote NBD server.
 #[derive(Debug)]
 pub struct Client<IO> {
-    conn: IO,
+    conn: RwLock<IO>,
     export: Export,
 }
 
@@ -85,7 +92,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Client<IO> {
         Self::initial_handshake(&mut stream).await?;
         let export = Self::handshake_haggle(&mut stream).await?;
         Ok(Self {
-            conn: stream,
+            conn: RwLock::new(stream),
             export,
         })
     }
@@ -96,8 +103,8 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Client<IO> {
         self.export.size
     }
 
-    async fn get_reply_data(&mut self, req: &Request, buf: &mut [u8]) -> Result<()> {
-        let reply = SimpleReply::get(&mut self.conn, buf).await?;
+    async fn get_reply_data(&self, req: &Request, buf: &mut [u8], t: &mut IO) -> Result<()> {
+        let reply = SimpleReply::get(t, buf).await?;
         if reply.handle != req.handle {
             bail!(format!(
                 "reply for wrong handle {} != {}",
@@ -110,39 +117,51 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Client<IO> {
         Ok(())
     }
 
-    async fn get_ack(&mut self, req: &Request) -> Result<()> {
-        self.get_reply_data(req, &mut []).await
+    async fn get_ack(&self, req: &Request, t: &mut IO) -> Result<()> {
+        self.get_reply_data(req, &mut [], t).await
     }
 
     /// Send a read command to the NBD server.
-    pub async fn read(&mut self, offset: u64, len: u32) -> Result<Vec<u8>> {
+    pub async fn read(&self, offset: u64, len: u32) -> Result<Vec<u8>> {
+        let mut t = self.conn.write().await;
         let req = Request::new(Cmd::READ, offset, len);
-        req.put(&[], &mut self.conn).await?;
+        req.put(&[], &mut *t).await?;
         let mut buf = vec![0; len as usize];
-        self.get_reply_data(&req, &mut buf).await?;
+        self.get_reply_data(&req, &mut buf, &mut *t).await?;
         Ok(buf)
     }
 
+    /// Send a read command to the NBD server given a buf
+    pub async fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        let mut t = self.conn.write().await;
+        let req = Request::new(Cmd::READ, offset, buf.len() as u32);
+        req.put(&[], &mut *t).await?;
+        self.get_reply_data(&req, buf, &mut *t).await?;
+        Ok(())
+    }
+
     /// Send a write command to the NBD server.
-    pub async fn write(&mut self, offset: u64, data: &[u8]) -> Result<()> {
+    pub async fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
+        let mut t = self.conn.write().await;
         let req = Request::new(Cmd::WRITE, offset, data.len() as u32);
-        req.put(data, &mut self.conn).await?;
-        self.get_ack(&req).await?;
+        req.put(data, &mut *t).await?;
+        self.get_ack(&req, &mut *t).await?;
         Ok(())
     }
 
     /// Send a flush command to the NBD server.
-    pub async fn flush(&mut self) -> Result<()> {
+    pub async fn flush(&self) -> Result<()> {
+        let mut t = self.conn.write().await;
         let req = Request::new(Cmd::FLUSH, 0, 0);
-        req.put(&[], &mut self.conn).await?;
-        self.get_ack(&req).await?;
+        req.put(&[], &mut *t).await?;
+        self.get_ack(&req, &mut *t).await?;
         Ok(())
     }
 
     /// Disconnect from server cleanly and consume this client.
     pub async fn disconnect(mut self) -> Result<()> {
         Request::new(Cmd::DISCONNECT, 0, 0)
-            .put(&[], &mut self.conn)
+            .put(&[], self.conn.get_mut())
             .await?;
         Ok(())
     }
@@ -157,8 +176,11 @@ impl Client<TcpStream> {
     }
 }
 
-impl<IO: IntoRawFd> IntoRawFd for Client<IO> {
-    fn into_raw_fd(self) -> RawFd {
-        self.conn.into_raw_fd()
+impl<IO: AsRawFd> AsRawFd for Client<IO> {
+    fn as_raw_fd(&self) -> RawFd {
+        let handle = Handle::current();
+        tokio::task::block_in_place(move || {
+            handle.block_on(async move { self.conn.read().await.as_raw_fd() })
+        })
     }
 }

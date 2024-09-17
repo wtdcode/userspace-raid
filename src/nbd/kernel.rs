@@ -167,11 +167,7 @@ fn set_flags(f: &File, flags: TransmitFlags) -> io::Result<()> {
 /// Then we see a handful of configuration ioctl calls followed by `ioctl(3,
 /// NBD_SET_SOCK, 4)`, which is the really important part. Then the process
 /// calls `clone` to keep running in the background.
-pub fn set_client<IO: AsyncRead + AsyncWrite + Unpin + IntoRawFd>(
-    nbd: &File,
-    client: Client<IO>,
-) -> Result<()> {
-    let size = client.size();
+pub fn set_client(nbd: &File, size: u64, fd: i32) -> Result<()> {
     set_blksize(nbd, 4096)?;
     set_size_blocks(nbd, size / 4096)?;
 
@@ -180,8 +176,7 @@ pub fn set_client<IO: AsyncRead + AsyncWrite + Unpin + IntoRawFd>(
 
     clear_sock(nbd)?;
 
-    let sock = client.into_raw_fd();
-    set_sock(nbd, sock).wrap_err("could not set nbd sock")?;
+    set_sock(nbd, fd).wrap_err("could not set nbd sock")?;
     Ok(())
 }
 

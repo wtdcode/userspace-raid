@@ -1,0 +1,25 @@
+[package]
+name = "urd"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bitflags = "2.6.0"
+byteorder = "1.5.0"
+clap = { version = "4.5.17", features = ["env", "derive"] }
+color-eyre = "0.6.3"
+num_enum = "0.7.3"
+rand = "0.8.5"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+readwrite = { version = "0.2.0", features = ["tokio"] }
+serial_test = "0.7.0"
+nix = { version = "0.24.1", default_features = false, features = ["ioctl"] }
+fork = "0.1.19"
+sudo = "0.6.0"
+pipe = "0.4.0"
+tokio = {version = "1.0", features = ["full"]}
+tokio-pipe = "0.2.12"
+regex = "1.10.6"
+futures = "0.3.30"
+hexdump = "0.1.2"
