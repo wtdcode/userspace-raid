@@ -91,7 +91,6 @@ impl RaidConfiguration {
 #[derive(Debug)]
 pub struct RAID {
     pub devices: Vec<Arc<DeviceConfiguration>>,
-    pub failures: RwLock<HashSet<usize>>,
     pub config: RaidConfiguration,
     pub size: usize,
 }
@@ -179,9 +178,35 @@ impl RAID {
         Ok(Self {
             devices: devices.into_iter().map(|t| Arc::new(t)).collect(),
             config: raid,
-            failures: RwLock::new(HashSet::new()),
             size: sz,
         })
+    }
+
+
+    pub async fn rebuild(&mut self) -> Result<()> {
+        if self.devices.iter().any(|t| t.need_rebuild()) {
+            info!("We are going to rebuilding!");
+
+            let stride = 1024.min(self.size);
+            let mut buf = vec![0u8; stride];
+            let mut off = 0;
+
+            while off < self.size {
+                if off + stride > self.size {
+                    buf.resize(self.size - off, 0);
+                }
+
+                self.read_at(&mut buf, off as u64).await?;
+                self.write_at(&buf, off as u64).await?;
+
+                off += stride;
+            }
+        }
+
+        for dev in self.devices.iter_mut() {
+            Arc::get_mut(dev).unwrap().rebuild_down();
+        }
+        Ok(())
     }
 
     // RAID0
@@ -773,7 +798,6 @@ impl RAID {
                 }
                 Err(e) => {
                     info!(e.device, "Degration detected during RAID6 raid");
-                    self.failures.write().await.insert(e.device);
                     failed_devices.insert(e.device);
                 }
             }
@@ -830,7 +854,7 @@ impl RAID {
                         }
                     }
 
-                    let mut recovered =
+                    let mut recovered: Vec<Vec<u8>> =
                         Self::raid6_recover(recover_bufs, stripe, first_parity, second_parity)?;
                     for (req_idx, failed_req) in failed_request {
                         all_recoverd.push((
@@ -874,11 +898,13 @@ impl RAID {
         // Try to get known buffers
         for (other_idx, other_req) in bufs.iter().enumerate() {
             let successful_req = request[other_idx];
+            trace!(successful_req.lhs_in_device, lhs_in_device, "raid6_retrieve_bufs");
             if successful_req.lhs_in_device == lhs_in_device {
                 if let Some(other_req) = other_req {
                     debug!(
-                        "Filled device {} from known buffers",
-                        successful_req.device.device
+                        "Filled device {} from known buffers, len = {}",
+                        successful_req.device.device,
+                        other_req.len()
                     );
                     recover_bufs[successful_req.device.device] = Some(other_req.clone());
                 }

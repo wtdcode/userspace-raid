@@ -40,7 +40,9 @@ pub async fn server_main(args: ServerCli) -> Result<()> {
         return Err(eyre!("No device is given"));
     }
 
-    let blocks = RAID::new(devices, raid).await?;
+    let mut blocks = RAID::new(devices, raid).await?;
+
+    blocks.rebuild().await?;
 
     info!("Our server is {:?}", &blocks);
     let server = Server::new(blocks);
