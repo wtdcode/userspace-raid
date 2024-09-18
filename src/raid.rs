@@ -1,7 +1,7 @@
 use crate::{
     device::DeviceConfiguration,
     nbd::server::Blocks,
-    parity::{gl_mul_two, GN},
+    parity::{gl_div_two, gl_mul_two, GN},
 };
 use color_eyre::{eyre::eyre, Result};
 use futures::{stream::FuturesUnordered, StreamExt};
@@ -452,6 +452,25 @@ impl RAID {
         Ok(request)
     }
 
+    fn raid6_split_groups(request: &Vec<RAID6Reqeust>) -> Vec<Vec<(usize, RAID6Reqeust)>> {
+        let mut groups = vec![];
+        let mut group: Vec<(usize, RAID6Reqeust)> = vec![];
+        for (idx, req) in request.iter().enumerate() {
+            if let Some(last) = group.last() {
+                if last.1.device.group == req.device.group {
+                    group.push((idx, *req));
+                } else {
+                    groups.push(std::mem::take(&mut group));
+                    group.push((idx, *req));
+                }
+            } else {
+                group.push((idx, *req));
+            }
+        }
+
+        return groups;
+    }
+
     async fn raid6_read_at(&self, buf: &mut [u8], off: u64, stripe: usize) -> std::io::Result<()> {
         let off = off as usize;
         let request = self.raid6_segments(off, buf.len(), stripe)?;
@@ -501,76 +520,290 @@ impl RAID {
         if failed_devices.len() == 0 {
             // happy path
         } else {
-            if failed_devices.len() > 1 {
+            if failed_devices.len() > 2 {
                 warn!(
                     "Only support 1 failed disk at this moment, we have {}",
                     failed_devices.len()
                 );
                 return Err(std::io::ErrorKind::InvalidData.into());
             }
-
+            let groups = Self::raid6_split_groups(&request);
             let mut all_recoverd = vec![];
-            if failed_devices.len() == 1 {
-                // determine which one failed
-                for (failed_idx, ret) in bufs.iter().enumerate() {
-                    if ret.is_none() {
-                        let failed_req = request[failed_idx];
-                        debug!(failed_idx, "Recovering... req = {:?}", failed_req);
+            if failed_devices.len() != 0 {
+                for group in groups {
+                    let mut recover_bufs = vec![None; self.devices.len()];
 
-                        // let mut buf = vec![0u8; stripe];
-                        let lhs_in_device = (failed_req.lhs_in_device / stripe) * stripe;
-                        let mut recover_bufs = vec![None; self.devices.len()];
+                    let mut failed_request = vec![];
+                    for (req_idx, req) in group.iter() {
+                        if bufs[*req_idx].is_none() {
+                            failed_request.push((*req_idx, *req));
+                        }
+                    }
 
-                        // Try to get known buffers
-                        for (other_idx, other_req) in bufs.iter().enumerate() {
-                            if other_idx != failed_idx {
-                                let successful_req = request[other_idx];
-                                if successful_req.lhs_in_device == lhs_in_device {
-                                    recover_bufs[successful_req.device.device] =
-                                        Some(other_req.as_ref().unwrap().2.clone());
-                                }
+                    if failed_request.len() == 0 {
+                        continue;
+                    }
+
+                    let lhs_in_device = (group[0].1.lhs_in_device / stripe) * stripe;
+                    let first_parity = group[0].1.device.first_parity;
+                    let second_parity = group[0].1.device.second_parity;
+                    debug!(
+                        first_parity,
+                        second_parity, lhs_in_device, "Failed request = {:?}", failed_request
+                    );
+                    // Try to get known buffers
+                    for (other_idx, other_req) in bufs.iter().enumerate() {
+                        let successful_req = request[other_idx];
+                        if successful_req.lhs_in_device == lhs_in_device {
+                            if let Some(other_req) = other_req {
+                                debug!(
+                                    "Filled device {} from known buffers",
+                                    successful_req.device.device
+                                );
+                                recover_bufs[successful_req.device.device] =
+                                    Some(other_req.2.clone());
                             }
                         }
+                    }
 
-                        for (device_idx, recover_buf) in recover_bufs.iter_mut().enumerate() {
-                            if recover_buf.is_none()
-                                && failed_req.device.device != device_idx
-                                && device_idx != failed_req.device.second_parity
+                    // get all
+                    for (device_idx, recover_buf) in recover_bufs.iter_mut().enumerate() {
+                        if recover_buf.is_none() {
+                            let mut buf = vec![0u8; stripe];
+                            match self.devices[device_idx]
+                                .read_at(&mut buf, lhs_in_device as u64)
+                                .await
                             {
-                                let mut buf = vec![0u8; stripe];
-                                self.devices[device_idx]
-                                    .read_at(&mut buf, lhs_in_device as u64)
-                                    .await?;
-                                *recover_buf = Some(buf);
+                                Ok(_) => {
+                                    debug!("Filled device {} by reading", device_idx);
+                                    *recover_buf = Some(buf);
+                                }
+                                Err(e) => {
+                                    debug!("Reading device {} failed due to {}", device_idx, e);
+                                }
                             }
                         }
+                    }
 
-                        let recovered =
-                            recover_bufs.into_iter().fold(vec![0u8; stripe], |acc, x| {
-                                if let Some(x) = x {
-                                    acc.into_iter()
-                                        .zip(x)
-                                        .into_iter()
-                                        .map(|(lhs, rhs)| lhs ^ rhs)
-                                        .collect()
-                                } else {
-                                    acc
+                    let mut failed_bufs = recover_bufs
+                        .iter()
+                        .enumerate()
+                        .filter(|t| t.1.is_none())
+                        .collect_vec();
+
+                    if failed_bufs.len() > 2 {
+                        warn!("More failure during rebuilding reading!")
+                    } else if failed_bufs.len() == 1 {
+                        let (failed_idx, failed_req) = failed_request.pop().unwrap();
+                        if recover_bufs[first_parity].is_some() {
+                            let recovered = recover_bufs
+                                .into_iter()
+                                .enumerate()
+                                .filter(|t| t.0 != second_parity)
+                                .fold(vec![0u8; stripe], |acc, x| {
+                                    if let Some(x) = x.1 {
+                                        acc.into_iter()
+                                            .zip(x)
+                                            .into_iter()
+                                            .map(|(lhs, rhs)| lhs ^ rhs)
+                                            .collect()
+                                    } else {
+                                        acc
+                                    }
+                                });
+                            all_recoverd.push((
+                                failed_idx,
+                                Some((
+                                    failed_req.offset.unwrap().0,
+                                    failed_req.offset.unwrap().1,
+                                    recovered,
+                                )),
+                            ));
+                        } else {
+                            warn!("Control flow shouldn't go here");
+                            return Err(std::io::ErrorKind::InvalidInput.into());
+                        }
+                    } else {
+                        let (x, _) = failed_bufs.pop().unwrap();
+                        let (y, _) = failed_bufs.pop().unwrap();
+
+                        let (x, y) = if x > y { (y, x) } else { (x, y) };
+
+                        if recover_bufs[first_parity].is_some()
+                            && recover_bufs[second_parity].is_some()
+                        {
+                            // two data drives fails
+                            let p = recover_bufs[first_parity].clone().unwrap();
+                            let q = recover_bufs[second_parity].clone().unwrap();
+
+                            let pxy = recover_bufs
+                                .iter()
+                                .enumerate()
+                                .filter(|t| t.0 != first_parity && t.0 != second_parity)
+                                .fold(vec![0u8; stripe], |acc, x| {
+                                    if let Some(x) = x.1 {
+                                        acc.into_iter().zip(x).map(|(a, b)| a ^ b).collect_vec()
+                                    } else {
+                                        acc
+                                    }
+                                });
+
+                            let mut qxy = vec![0u8; stripe];
+                            for (n, data) in recover_bufs.into_iter().enumerate() {
+                                if n == second_parity || n == first_parity {
+                                    continue;
                                 }
-                            });
-                        all_recoverd.push((
-                            failed_idx,
-                            Some((
-                                failed_req.offset.unwrap().0,
-                                failed_req.offset.unwrap().1,
-                                recovered,
-                            )),
-                        ));
+                                let gn = GN[n];
+                                let data = if let Some(data) = data {
+                                    data
+                                } else {
+                                    vec![0u8; stripe]
+                                };
+                                let data =
+                                    data.into_iter().map(|t| gl_mul_two(t, gn)).collect_vec();
+                                qxy = qxy
+                                    .into_iter()
+                                    .zip(data)
+                                    .map(|(lhs, rhs)| lhs ^ rhs)
+                                    .collect_vec();
+                            }
+
+                            let g_y_x = GN[y - x];
+                            let a = gl_div_two(g_y_x, g_y_x ^ 0x1);
+                            let b = gl_div_two(GN[255 - x], g_y_x ^ 0x1);
+
+                            let p_p_xy = p
+                                .into_iter()
+                                .zip(pxy.into_iter())
+                                .map(|(l, r)| l ^ r)
+                                .collect_vec();
+                            let dx = p_p_xy
+                                .clone()
+                                .into_iter()
+                                .map(|t| gl_mul_two(a, t))
+                                .zip(q.into_iter().zip(qxy).map(|(l, r)| gl_mul_two(b, l ^ r)))
+                                .map(|(l, r)| l ^ r)
+                                .collect_vec();
+
+                            let dy = p_p_xy
+                                .into_iter()
+                                .zip(dx.clone().into_iter())
+                                .map(|(l, r)| l ^ r)
+                                .collect_vec();
+
+                            for (req_idx, failed_req) in failed_request {
+                                if failed_req.device.device == x {
+                                    all_recoverd.push((
+                                        req_idx,
+                                        Some((
+                                            failed_req.offset.unwrap().0,
+                                            failed_req.offset.unwrap().1,
+                                            dx.clone(),
+                                        )),
+                                    ));
+                                }
+
+                                if failed_req.device.device == y {
+                                    all_recoverd.push((
+                                        req_idx,
+                                        Some((
+                                            failed_req.offset.unwrap().0,
+                                            failed_req.offset.unwrap().1,
+                                            dy.clone(),
+                                        )),
+                                    ));
+                                }
+                            }
+                        } else if recover_bufs[second_parity].is_none() {
+                            // This is easy, simply recalculate the corrupted data disk
+                            let recovered = recover_bufs
+                                .into_iter()
+                                .enumerate()
+                                .filter(|t| t.0 != second_parity)
+                                .fold(vec![0u8; stripe], |acc, x| {
+                                    if let Some(x) = x.1 {
+                                        acc.into_iter()
+                                            .zip(x)
+                                            .into_iter()
+                                            .map(|(lhs, rhs)| lhs ^ rhs)
+                                            .collect()
+                                    } else {
+                                        acc
+                                    }
+                                });
+                            for (req_idx, failed_req) in failed_request {
+                                if failed_req.device.device == x && x != second_parity {
+                                    all_recoverd.push((
+                                        req_idx,
+                                        Some((
+                                            failed_req.offset.unwrap().0,
+                                            failed_req.offset.unwrap().1,
+                                            recovered.clone(),
+                                        )),
+                                    ));
+                                }
+
+                                if failed_req.device.device == y && y != second_parity {
+                                    all_recoverd.push((
+                                        req_idx,
+                                        Some((
+                                            failed_req.offset.unwrap().0,
+                                            failed_req.offset.unwrap().1,
+                                            recovered.clone(),
+                                        )),
+                                    ));
+                                }
+                            }
+                        } else if recover_bufs[first_parity].is_none() {
+                            let x = if x == first_parity { y } else { x };
+
+                            let mut q = recover_bufs[second_parity].as_ref().unwrap().clone();
+                            let mut qxy = vec![0u8; stripe];
+                            for (n, data) in recover_bufs.into_iter().enumerate() {
+                                if n == second_parity || n == first_parity {
+                                    continue;
+                                }
+                                let gn = GN[n];
+                                let data = if let Some(data) = data {
+                                    data
+                                } else {
+                                    vec![0u8; stripe]
+                                };
+                                let data =
+                                    data.into_iter().map(|t| gl_mul_two(t, gn)).collect_vec();
+                                qxy = qxy
+                                    .into_iter()
+                                    .zip(data)
+                                    .map(|(lhs, rhs)| lhs ^ rhs)
+                                    .collect_vec();
+                            }
+
+                            let g_x = GN[255 - x];
+                            let dx = q
+                                .into_iter()
+                                .zip(qxy.into_iter())
+                                .map(|(l, r)| gl_mul_two(g_x, l ^ r))
+                                .collect_vec();
+                            for (req_idx, failed_req) in failed_request {
+                                if failed_req.device.device == x {
+                                    all_recoverd.push((
+                                        req_idx,
+                                        Some((
+                                            failed_req.offset.unwrap().0,
+                                            failed_req.offset.unwrap().1,
+                                            dx,
+                                        )),
+                                    ));
+                                    break;
+                                }
+                            }
+                        }
                     }
                 }
+            }
 
-                for (idx, seg) in all_recoverd {
-                    bufs[idx] = seg;
-                }
+            for (idx, seg) in all_recoverd {
+                bufs[idx] = seg;
             }
         }
 
