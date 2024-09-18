@@ -64,7 +64,7 @@ fn gl_mul02_64(v: u64) -> u64 {
 
 pub fn gl_mul_two(lhs: u8, rhs: u8) -> u8 {
     if lhs == 0 || rhs == 0 {
-        warn!(lhs, rhs, "GL mul 0??");
+        // warn!(lhs, rhs, "GL mul 0??");
         return 0;
     }
 

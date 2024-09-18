@@ -1,7 +1,7 @@
 use clap::{Args, Parser, Subcommand};
 use color_eyre::Result;
 use mount::{mount_main, MountCli};
-use read::{read_main, ReadCli};
+use read::{test_main, TestCli};
 use server::{server_main, ServerCli};
 use tracing::info;
 
@@ -16,7 +16,7 @@ mod server;
 enum Command {
     Server(ServerCli),
     Mount(MountCli),
-    Read(ReadCli),
+    Test(TestCli),
 }
 
 #[derive(Parser)]
@@ -29,7 +29,7 @@ async fn cli_main(args: Cli) -> Result<()> {
     match args.cmd {
         Command::Server(args) => server_main(args).await,
         Command::Mount(args) => mount_main(args).await,
-        Command::Read(args) => read_main(args).await,
+        Command::Test(args) => test_main(args).await,
     }
 }
 

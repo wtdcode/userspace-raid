@@ -16,7 +16,7 @@ use std::{
     sync::Arc,
 };
 use tokio::task::{JoinSet, LocalSet};
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 pub fn cli_configurations(s: &str) -> Result<HashMap<String, String>> {
     let mut ret = HashMap::new();
@@ -177,6 +177,7 @@ impl RAID {
         stripe: usize,
         devices: usize,
     ) -> (usize, usize) {
+        trace!(off, bytes_left, stripe, devices, "striped_off_to_device");
         let lhs_in_device = Self::off_to_device_off(off, stripe, devices);
         let rhs_in_device = (lhs_in_device / stripe) * stripe + stripe.min(bytes_left);
 
@@ -311,7 +312,7 @@ impl RAID {
                 first_parity: first_parity,
                 second_parity: second_parity,
                 first_data: 0,
-                last_data: data_devices,
+                last_data: data_devices - 1,
             }
         } else if data_idx < (data_devices - group) {
             RAID6Device {
@@ -351,7 +352,7 @@ impl RAID {
         while lhs < off + len {
             let rhs = (((lhs / stripe) + 1) * stripe).min(len + off as usize);
             let (lhs_in_device, rhs_in_device) =
-                Self::striped_off_to_device(off, len + off - lhs, stripe, data_devces);
+                Self::striped_off_to_device(lhs, len + off - lhs, stripe, data_devces);
 
             if rhs_in_device - lhs_in_device != rhs - lhs {
                 warn!(
@@ -487,7 +488,7 @@ impl RAID {
 
         for chunk in request
             .into_iter()
-            .chunks(4)
+            .chunks(self.devices.len() - 2)
             .into_iter()
             .map(|t| t.collect_vec())
         {
@@ -546,11 +547,14 @@ impl RAID {
                 }
 
                 // Write parities
+                let lhs_in_parity = ((target.lhs_in_device / stripe) * stripe) as u64;
+                debug!(
+                    target.device.first_parity,
+                    target.device.second_parity, lhs_in_parity, "Parity writting..."
+                );
                 let (r1, r2) = tokio::join!(
-                    devs[target.device.first_parity]
-                        .write_at(&xored, ((target.lhs_in_device / stripe) * stripe) as u64),
-                    devs[target.device.second_parity]
-                        .write_at(&gl, ((target.lhs_in_device / stripe) * stripe) as u64)
+                    devs[target.device.first_parity].write_at(&xored, lhs_in_parity),
+                    devs[target.device.second_parity].write_at(&gl, lhs_in_parity)
                 );
 
                 let _ = r1?;
