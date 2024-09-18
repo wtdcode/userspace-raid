@@ -588,7 +588,8 @@ impl RAID {
 
                 recover_bufs[x] = Some(dx);
                 recover_bufs[y] = Some(dy);
-            } else if recover_bufs[second_parity].is_none() && recover_bufs[first_parity].is_some() {
+            } else if recover_bufs[second_parity].is_none() && recover_bufs[first_parity].is_some()
+            {
                 // This is easy, simply recalculate the corrupted data disk
                 let recovered = recover_bufs
                     .iter()
@@ -628,7 +629,8 @@ impl RAID {
                 }
 
                 recover_bufs[y] = Some(gl);
-            } else if recover_bufs[first_parity].is_none() && recover_bufs[second_parity].is_some() {
+            } else if recover_bufs[first_parity].is_none() && recover_bufs[second_parity].is_some()
+            {
                 let (x, y) = if x == first_parity { (y, x) } else { (x, y) };
 
                 let mut q = recover_bufs[second_parity].as_ref().unwrap().clone();
@@ -703,15 +705,15 @@ impl RAID {
                 {
                     let data = data.as_ref().unwrap();
                     let gn = GN[n];
-                    trace!(gn, n, "GL, {:?}", data);
+                    // trace!(gn, n, "GL, {:?}", data);
                     let data = data.iter().map(|t| gl_mul_two(*t, gn)).collect_vec();
-                    trace!(gn, n, "GL2, {:?}", data);
+                    // trace!(gn, n, "GL2, {:?}", data);
                     gl = gl
                         .into_iter()
                         .zip(data)
                         .map(|(lhs, rhs)| lhs ^ rhs)
                         .collect_vec();
-                    trace!(gn, n, "GL3, {:?}", gl);
+                    // trace!(gn, n, "GL3, {:?}", gl);
                 }
 
                 recover_bufs[first_parity] = Some(pxy);
@@ -911,21 +913,14 @@ impl RAID {
     async fn raid6_write_at(&self, buf: &[u8], off: u64, stripe: usize) -> std::io::Result<()> {
         let off = off as usize;
         let request = self.raid6_segments(off, buf.len(), stripe)?;
-        let mut read_bufs = vec![None; request.len()];
         let mut write_bufs = vec![None; request.len()];
         let mut js = FuturesUnordered::new();
         for (req_idx, req) in request.iter().enumerate() {
             if let Some((lhs, rhs)) = req.offset {
                 let dev = self.devices[req.device.device].clone();
                 let lhs_in_device = req.lhs_in_device;
+                write_bufs[req_idx] = Some(buf[lhs - off..rhs - off].to_vec());
                 js.push(async move {
-                    let mut read_buf = vec![0u8; rhs - lhs];
-                    dev.read_at(&mut read_buf, lhs_in_device as u64)
-                        .await
-                        .map_err(|e| RAIDError {
-                            device: req.device.device,
-                            err: e,
-                        })?;
                     let buf = &buf[lhs - off..rhs - off];
                     debug!(
                         lhs_in_device,
@@ -939,7 +934,7 @@ impl RAID {
                             device: req.device.device,
                             err: e,
                         })?;
-                    Ok::<_, RAIDError>((req_idx, read_buf, buf.to_vec()))
+                    Ok::<_, RAIDError>(())
                 });
             }
         }
@@ -947,12 +942,9 @@ impl RAID {
         let mut failed_device = HashSet::new();
         while let Some(r) = js.next().await {
             match r {
-                Ok((req_idx, rbuf, wbuf)) => {
-                    read_bufs[req_idx] = Some(rbuf);
-                    write_bufs[req_idx] = Some(wbuf);
-                }
+                Ok(_) => {}
                 Err(e) => {
-                    info!(e.device, "Degreation detected");
+                    info!(e.device, "Degreation detected during write");
                     failed_device.insert(e.device);
                 }
             }
@@ -970,46 +962,28 @@ impl RAID {
                 let first_parity = group[0].1.device.first_parity;
                 let second_parity = group[0].1.device.second_parity;
                 let lhs_in_device = (group[0].1.lhs_in_device / stripe) * stripe;
-                let write_bufs = if failed_device.len() > 0 {
-                    let read_bufs = self
-                        .raid6_retrieve_bufs(stripe, &group, &request, &read_bufs, false)
-                        .await;
-
-                    let mut recovered_read =
-                        Self::raid6_recover(read_bufs, stripe, first_parity, second_parity)?;
-
-                    // Construct new
-                    let mut write_bufs = self
-                        .raid6_retrieve_bufs(stripe, &group, &request, &write_bufs, true)
-                        .await;
-                    // Assign read bufs
-                    for (idx, wbuf) in write_bufs.iter_mut().enumerate() {
-                        if wbuf.is_none() && idx != first_parity && idx != second_parity {
-                            *wbuf = Some(std::mem::take(&mut recovered_read[idx]));
-                        }
-                    }
-                    write_bufs
-                } else {
-                    self.raid6_retrieve_bufs(stripe, &group, &request, &write_bufs, true)
-                        .await
-                };
+                let write_bufs = self
+                    .raid6_retrieve_bufs(stripe, &group, &request, &write_bufs, true)
+                    .await;
 
                 let recovered =
                     Self::raid6_recover(write_bufs, stripe, first_parity, second_parity)?;
-                trace!(
-                    "Parities {:?} || {:?}",
-                    recovered[first_parity],
-                    recovered[second_parity]
-                );
+                // trace!(
+                //     "Parities {:?} || {:?}",
+                //     recovered[first_parity],
+                //     recovered[second_parity]
+                // );
                 // write, not considered failing here
                 for (dev_idx, buf) in recovered.into_iter().enumerate() {
                     match self.devices[dev_idx]
                         .write_at(&buf, lhs_in_device as u64)
                         .await
                     {
-                        Ok(_) => {}
+                        Ok(_) => {
+                            debug!(dev_idx, "Write successfully");
+                        }
                         Err(e) => {
-                            info!(dev_idx, "Fail to write");
+                            debug!(dev_idx, "Fail to write due to {}", e);
                         }
                     }
                 }
