@@ -117,3 +117,14 @@ To emulate a faulty device, simply use `dummy` device
         --device /tmp/file3 \
         --device /tmp/file4
 ```
+
+RAID6 can have a maximum of 2 device fault toleration, that is:
+
+```
+./target/release/urd server --level 6 \
+        --raid stripe=1024 \
+        --device type=dummy \ # Note all data disk are faulty!
+        --device type=dummy \
+        --device /tmp/file3 \
+        --device /tmp/file4
+```
