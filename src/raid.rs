@@ -8,15 +8,19 @@ use futures::{stream::FuturesUnordered, StreamExt};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fmt::{Debug, Display},
     future::Future,
     pin::Pin,
     str::FromStr,
     sync::Arc,
 };
-use tokio::task::{JoinSet, LocalSet};
-use tracing::{debug, trace, warn};
+use thiserror::Error;
+use tokio::{
+    sync::RwLock,
+    task::{JoinSet, LocalSet},
+};
+use tracing::{debug, info, trace, warn};
 
 pub fn cli_configurations(s: &str) -> Result<HashMap<String, String>> {
     let mut ret = HashMap::new();
@@ -87,7 +91,7 @@ impl RaidConfiguration {
 #[derive(Debug)]
 pub struct RAID {
     pub devices: Vec<Arc<DeviceConfiguration>>,
-    pub failures: Vec<usize>,
+    pub failures: RwLock<HashSet<usize>>,
     pub config: RaidConfiguration,
     pub size: usize,
 }
@@ -108,6 +112,17 @@ impl Display for RAID6Device {
     }
 }
 
+#[derive(Error, Debug)]
+pub struct RAIDError {
+    pub device: usize,
+    pub err: std::io::Error,
+}
+
+impl Display for RAIDError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.err, f)
+    }
+}
 #[derive(Debug, Clone, Copy)]
 struct RAID6Reqeust {
     pub offset: Option<(usize, usize)>,
@@ -124,8 +139,14 @@ impl RAID {
         let mut sizes = vec![];
 
         for dev in devices.iter() {
-            let sz = dev.size().await?;
-            sizes.push(sz as usize);
+            match dev.size().await {
+                Ok(sz) => {
+                    sizes.push(sz as usize);
+                }
+                Err(e) => {
+                    warn!("Device not having a size, skipped, error = {}", e);
+                }
+            }
         }
 
         let min = *sizes.iter().min().unwrap();
@@ -158,7 +179,7 @@ impl RAID {
         Ok(Self {
             devices: devices.into_iter().map(|t| Arc::new(t)).collect(),
             config: raid,
-            failures: vec![],
+            failures: RwLock::new(HashSet::new()),
             size: sz,
         })
     }
@@ -334,42 +355,13 @@ impl RAID {
             }
         }
     }
-    fn raid6_segments(
+
+    fn raid6_segments_extend(
         &self,
-        off: usize,
-        len: usize,
         stripe: usize,
-    ) -> std::io::Result<VecDeque<RAID6Reqeust>> {
-        if off + len > self.size {
-            return Err(std::io::ErrorKind::InvalidInput.into());
-        }
-        let mut request = VecDeque::new();
-
-        let mut lhs = off as usize;
-        let data_devces = self.devices.len() - 2; // data drives
-        let devices = self.devices.len();
-
-        while lhs < off + len {
-            let rhs = (((lhs / stripe) + 1) * stripe).min(len + off as usize);
-            let (lhs_in_device, rhs_in_device) =
-                Self::striped_off_to_device(lhs, len + off - lhs, stripe, data_devces);
-
-            if rhs_in_device - lhs_in_device != rhs - lhs {
-                warn!(
-                    lhs,
-                    rhs, lhs_in_device, rhs_in_device, "Inconsistency in RAID6 detected"
-                );
-                return Err(std::io::ErrorKind::ConnectionReset.into());
-            }
-            request.push_back(RAID6Reqeust {
-                offset: Some((lhs, rhs)),
-                lhs_in_device,
-                rhs_in_device,
-                device: Self::raid6_off_to_device(lhs, stripe, devices),
-            });
-
-            lhs = rhs;
-        }
+        request: Vec<RAID6Reqeust>,
+    ) -> Vec<RAID6Reqeust> {
+        let mut request: VecDeque<RAID6Reqeust> = request.into_iter().collect();
 
         // Extend the request to a full group
         if request.len() > 0 {
@@ -417,6 +409,46 @@ impl RAID {
             }
         }
 
+        request.into_iter().collect()
+    }
+
+    fn raid6_segments(
+        &self,
+        off: usize,
+        len: usize,
+        stripe: usize,
+    ) -> std::io::Result<Vec<RAID6Reqeust>> {
+        if off + len > self.size {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+        let mut request = Vec::new();
+
+        let mut lhs = off as usize;
+        let data_devces = self.devices.len() - 2; // data drives
+        let devices = self.devices.len();
+
+        while lhs < off + len {
+            let rhs = (((lhs / stripe) + 1) * stripe).min(len + off as usize);
+            let (lhs_in_device, rhs_in_device) =
+                Self::striped_off_to_device(lhs, len + off - lhs, stripe, data_devces);
+
+            if rhs_in_device - lhs_in_device != rhs - lhs {
+                warn!(
+                    lhs,
+                    rhs, lhs_in_device, rhs_in_device, "Inconsistency in RAID6 detected"
+                );
+                return Err(std::io::ErrorKind::ConnectionReset.into());
+            }
+            request.push(RAID6Reqeust {
+                offset: Some((lhs, rhs)),
+                lhs_in_device,
+                rhs_in_device,
+                device: Self::raid6_off_to_device(lhs, stripe, devices),
+            });
+
+            lhs = rhs;
+        }
+
         Ok(request)
     }
 
@@ -425,60 +457,139 @@ impl RAID {
         let request = self.raid6_segments(off, buf.len(), stripe)?;
         let mut js = JoinSet::new();
 
-        for req in request {
+        for (req_idx, req) in request.iter().enumerate() {
             if let Some((lhs, rhs)) = req.offset {
                 let dev = self.devices[req.device.device].clone();
                 let lhs_in_device = req.lhs_in_device;
                 let rhs_in_device = req.rhs_in_device;
+                let req = req.clone();
                 js.spawn(async move {
                     let mut buf = vec![0u8; rhs_in_device - lhs_in_device];
                     debug!(
+                        req_idx,
                         lhs_in_device,
                         size = buf.len(),
                         "RAID6 read request, request = {:?}",
                         req
                     );
-                    dev.read_at(&mut buf, lhs_in_device as u64).await?;
-                    Ok::<_, std::io::Error>((lhs, rhs, buf))
+                    dev.read_at(&mut buf, lhs_in_device as u64)
+                        .await
+                        .map_err(|e| RAIDError {
+                            device: req.device.device,
+                            err: e,
+                        })?;
+                    Ok::<_, RAIDError>((req_idx, lhs, rhs, buf))
                 });
             }
         }
 
+        let mut bufs = vec![None; request.len()];
+        let mut failed_devices = HashSet::new();
         while let Some(ret) = js.join_next().await {
-            let (lhs, rhs, seg_buf) = ret??;
+            match ret? {
+                Ok((req_idx, lhs, rhs, seg_buf)) => {
+                    bufs[req_idx] = Some((lhs, rhs, seg_buf));
+                }
+                Err(e) => {
+                    info!(e.device, "Degration detected during RAID6 raid");
+                    self.failures.write().await.insert(e.device);
+                    failed_devices.insert(e.device);
+                }
+            }
+        }
 
+        if failed_devices.len() == 0 {
+            // happy path
+        } else {
+            if failed_devices.len() > 1 {
+                warn!(
+                    "Only support 1 failed disk at this moment, we have {}",
+                    failed_devices.len()
+                );
+                return Err(std::io::ErrorKind::InvalidData.into());
+            }
+
+            let mut all_recoverd = vec![];
+            if failed_devices.len() == 1 {
+                // determine which one failed
+                for (failed_idx, ret) in bufs.iter().enumerate() {
+                    if ret.is_none() {
+                        let failed_req = request[failed_idx];
+                        debug!(failed_idx, "Recovering... req = {:?}", failed_req);
+
+                        // let mut buf = vec![0u8; stripe];
+                        let lhs_in_device = (failed_req.lhs_in_device / stripe) * stripe;
+                        let mut recover_bufs = vec![None; self.devices.len()];
+
+                        // Try to get known buffers
+                        for (other_idx, other_req) in bufs.iter().enumerate() {
+                            if other_idx != failed_idx {
+                                let successful_req = request[other_idx];
+                                if successful_req.lhs_in_device == lhs_in_device {
+                                    recover_bufs[successful_req.device.device] =
+                                        Some(other_req.as_ref().unwrap().2.clone());
+                                }
+                            }
+                        }
+
+                        for (device_idx, recover_buf) in recover_bufs.iter_mut().enumerate() {
+                            if recover_buf.is_none()
+                                && failed_req.device.device != device_idx
+                                && device_idx != failed_req.device.second_parity
+                            {
+                                let mut buf = vec![0u8; stripe];
+                                self.devices[device_idx]
+                                    .read_at(&mut buf, lhs_in_device as u64)
+                                    .await?;
+                                *recover_buf = Some(buf);
+                            }
+                        }
+
+                        let recovered =
+                            recover_bufs.into_iter().fold(vec![0u8; stripe], |acc, x| {
+                                if let Some(x) = x {
+                                    acc.into_iter()
+                                        .zip(x)
+                                        .into_iter()
+                                        .map(|(lhs, rhs)| lhs ^ rhs)
+                                        .collect()
+                                } else {
+                                    acc
+                                }
+                            });
+                        all_recoverd.push((
+                            failed_idx,
+                            Some((
+                                failed_req.offset.unwrap().0,
+                                failed_req.offset.unwrap().1,
+                                recovered,
+                            )),
+                        ));
+                    }
+                }
+
+                for (idx, seg) in all_recoverd {
+                    bufs[idx] = seg;
+                }
+            }
+        }
+
+        for seg_buf in bufs {
+            let (lhs, rhs, seg_buf) = seg_buf.unwrap();
             buf[lhs - off..rhs - off].copy_from_slice(&seg_buf);
         }
 
         Ok(())
     }
 
-    async fn raid6_write_at<'a>(&self, buf: &[u8], off: u64, stripe: usize) -> std::io::Result<()> {
-        let off = off as usize;
-        let request = self.raid6_segments(off, buf.len(), stripe)?;
-        let mut js = FuturesUnordered::new();
-        for req in request.iter() {
-            if let Some((lhs, rhs)) = req.offset {
-                let dev = self.devices[req.device.device].clone();
-                let lhs_in_device = req.lhs_in_device;
-                js.push(async move {
-                    let buf = &buf[lhs - off..rhs - off];
-                    debug!(
-                        lhs_in_device,
-                        size = buf.len(),
-                        "RAID6 write request, device = {:?}",
-                        req
-                    );
-                    dev.write_at(buf, lhs_in_device as u64).await?;
-                    Ok::<_, std::io::Error>(())
-                });
-            }
-        }
-
-        while let Some(r) = js.next().await {
-            let _ = r?;
-        }
-        drop(js);
+    async fn compute_parities(
+        &self,
+        buf: &[u8],
+        off: usize,
+        stripe: usize,
+        request: Vec<RAID6Reqeust>,
+    ) -> std::io::Result<()> {
+        let request = self.raid6_segments_extend(stripe, request);
         let mut js = FuturesUnordered::new();
         // Now compute parities
         if request.len() % (self.devices.len() - 2) != 0 {
@@ -569,6 +680,38 @@ impl RAID {
 
         Ok(())
     }
+
+    async fn raid6_write_at(&self, buf: &[u8], off: u64, stripe: usize) -> std::io::Result<()> {
+        let off = off as usize;
+        let request = self.raid6_segments(off, buf.len(), stripe)?;
+        let mut js = FuturesUnordered::new();
+        for req in request.iter() {
+            if let Some((lhs, rhs)) = req.offset {
+                let dev = self.devices[req.device.device].clone();
+                let lhs_in_device = req.lhs_in_device;
+                js.push(async move {
+                    let buf = &buf[lhs - off..rhs - off];
+                    debug!(
+                        lhs_in_device,
+                        size = buf.len(),
+                        "RAID6 write request, device = {:?}",
+                        req
+                    );
+                    dev.write_at(buf, lhs_in_device as u64).await?;
+                    Ok::<_, std::io::Error>(())
+                });
+            }
+        }
+
+        while let Some(r) = js.next().await {
+            let _ = r?;
+        }
+        drop(js);
+        self.compute_parities(buf, off, stripe, request.into_iter().collect())
+            .await?;
+
+        Ok(())
+    }
 }
 
 impl Blocks for RAID {
@@ -582,7 +725,7 @@ impl Blocks for RAID {
             }
 
             while let Some(t) = js.join_next().await {
-                let _ = t??;
+                let _ = t?; // ignore errors from flushing
             }
 
             Ok(())

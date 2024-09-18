@@ -26,15 +26,15 @@ pub struct TestCli {
     #[arg(short, long)]
     raw: bool,
 
-    #[arg(long)]
-    read: bool,
+    #[arg(short, long)]
+    write: bool,
 }
 
 pub async fn test_main(args: TestCli) -> Result<()> {
     let tcp = TcpStream::connect(args.host).await?;
     let client = Client::new(tcp).await?;
 
-    let out = if !args.read {
+    let out = if args.write {
         info!("Connected, writing random data...");
         let mut rng = rand::thread_rng();
         let data = (0..args.size)

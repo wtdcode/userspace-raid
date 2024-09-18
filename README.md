@@ -76,12 +76,12 @@ The available shorthand includes:
 - `--device /dev/sda`, connects to a local block device
 - `--device 2048m`, create a in-memory device with 2048m available space
 
-The full configuration is `--device type=[file|f|block|b|remote|r|memory|m][,property=...]`, with the properties:
+The full configuration is `--device type=[file|f|block|b|remote|r|memory|m|d|dummy][,property=...]`, with the properties:
 
 - `file|f`: `path`
 - `block|b`: `path`
-- `remote`: `address`
-- `memory`: `size`
+- `remote|r`: `address`
+- `memory|m`: `size`
 
 #### RAID Configuration
 
@@ -101,6 +101,19 @@ bash -c 'for i in $(seq 1 5);do truncate -s 1G "/tmp/file$i"; done'
         --raid stripe=1024 \
         --device /tmp/file1 \
         --device /tmp/file2 \
+        --device /tmp/file3 \
+        --device /tmp/file4
+```
+
+### Faulty device
+
+To emulate a faulty device, simply use `dummy` device
+
+```
+./target/release/urd server --level 6 \
+        --raid stripe=1024 \
+        --device /tmp/file1 \
+        --device dummy \ # Note this is the faulty device!
         --device /tmp/file3 \
         --device /tmp/file4
 ```
