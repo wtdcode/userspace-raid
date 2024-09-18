@@ -79,7 +79,7 @@ pub fn gl_mul_two(lhs: u8, rhs: u8) -> u8 {
         return 0;
     }
 
-    return GN[(LOGN[lhs as usize] + LOGN[rhs as usize]) as usize];
+    return GN[(LOGN[lhs as usize] as u16 + LOGN[rhs as usize] as u16) as usize];
 }
 
 pub fn gl_div_two(lhs: u8, rhs: u8) -> u8 {
@@ -87,14 +87,25 @@ pub fn gl_div_two(lhs: u8, rhs: u8) -> u8 {
         return 0;
     }
 
-    return GN[(LOGN[lhs as usize] + 255 - LOGN[rhs as usize]) as usize];
+    return GN[(LOGN[lhs as usize] as u16 + 255 - LOGN[rhs as usize] as u16) as usize];
 }
 
 #[cfg(test)]
 mod test {
     use itertools::Itertools;
 
-    use super::gl_mul02_u8;
+    use super::{gl_div_two, gl_mul02_u8, gl_mul_two};
+
+    #[test]
+    fn test_mul_div() {
+        for l in 1..255 {
+            for r in 1..255 {
+                let v = gl_mul_two(l, r);
+                let r2 = gl_div_two(v, l);
+                assert_eq!(r2, r);
+            }
+        }
+    }
 
     #[test]
     fn test_gen() {
