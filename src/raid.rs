@@ -467,6 +467,9 @@ impl RAID {
                 group.push((idx, *req));
             }
         }
+        if group.len() != 0 {
+            groups.push(std::mem::take(&mut group));
+        }
 
         return groups;
     }
@@ -485,6 +488,7 @@ impl RAID {
                 js.spawn(async move {
                     let mut buf = vec![0u8; rhs_in_device - lhs_in_device];
                     debug!(
+                        off,
                         req_idx,
                         lhs_in_device,
                         size = buf.len(),
@@ -595,6 +599,7 @@ impl RAID {
                         warn!("More failure during rebuilding reading!")
                     } else if failed_bufs.len() == 1 {
                         let (failed_idx, failed_req) = failed_request.pop().unwrap();
+                        debug!(failed_idx, "We only have 1 failed bufs");
                         if recover_bufs[first_parity].is_some() {
                             let recovered = recover_bufs
                                 .into_iter()
@@ -626,7 +631,7 @@ impl RAID {
                     } else {
                         let (x, _) = failed_bufs.pop().unwrap();
                         let (y, _) = failed_bufs.pop().unwrap();
-
+                        debug!(x, y, "We only have 2 failed bufs");
                         let (x, y) = if x > y { (y, x) } else { (x, y) };
 
                         if recover_bufs[first_parity].is_some()
@@ -797,11 +802,16 @@ impl RAID {
                                     break;
                                 }
                             }
+                        } else {
+                            warn!("Not covered??");
+                            return Err(std::io::ErrorKind::InvalidData.into());
                         }
                     }
                 }
             }
 
+            let recovered_reqs = all_recoverd.iter().map(|t| t.0).collect_vec();
+            debug!("We have recovered {:?}", recovered_reqs);
             for (idx, seg) in all_recoverd {
                 bufs[idx] = seg;
             }
