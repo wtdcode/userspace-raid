@@ -22,7 +22,7 @@ pub struct ReadCli {
     output: String,
 
     #[arg(short, long)]
-    raw: bool
+    raw: bool,
 }
 
 pub async fn read_main(args: ReadCli) -> Result<()> {
@@ -39,7 +39,11 @@ pub async fn read_main(args: ReadCli) -> Result<()> {
             hexdump::hexdump(&out);
         }
     } else {
-        let mut fpath = std::fs::OpenOptions::new().write(true).truncate(true).create(true).open(&args.output)?;
+        let mut fpath = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .create(true)
+            .open(&args.output)?;
 
         fpath.write_all(&out)?;
     }

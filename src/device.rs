@@ -7,6 +7,7 @@ use std::net::{SocketAddrV4, SocketAddrV6};
 use std::os::fd::AsRawFd;
 use std::os::linux::fs::MetadataExt;
 use std::pin::Pin;
+use std::time::Duration;
 use std::{path::PathBuf, str::FromStr};
 use tracing::{info, warn};
 
@@ -71,21 +72,23 @@ pub fn connectable(s: &str) -> bool {
 #[derive(Debug)]
 pub enum DeviceConfiguration {
     Memory(MemBlocks),
-    File(File, u64),
-    BlockDevice(File, u64),
-    NetworkBlockDevice(Client<TcpStream>),
+    File(File, u64, PathBuf),
+    BlockDevice(File, u64, PathBuf),
+    NetworkBlockDevice(Client<TcpStream>, String),
+    Dummy,
 }
 
 impl Blocks for DeviceConfiguration {
     fn flush(&self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
         Box::pin(async move {
             match self {
-                Self::File(fp, _) => fp.flush().await,
-                Self::BlockDevice(fp, _) => fp.flush().await,
-                Self::NetworkBlockDevice(cl) => {
+                Self::File(fp, _, _) => fp.flush().await,
+                Self::BlockDevice(fp, _, _) => fp.flush().await,
+                Self::NetworkBlockDevice(cl, _) => {
                     cl.flush().await.map_err(|e| std::io::Error::other(e))
                 }
                 Self::Memory(m) => m.flush().await,
+                Self::Dummy => Err(std::io::ErrorKind::NotConnected.into()),
             }
         })
     }
@@ -97,13 +100,14 @@ impl Blocks for DeviceConfiguration {
     ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
         Box::pin(async move {
             match self {
-                Self::File(fp, _) => fp.read_at(buf, off).await,
-                Self::BlockDevice(fp, _) => fp.read_at(buf, off).await,
-                Self::NetworkBlockDevice(cl) => cl
+                Self::File(fp, _, _) => fp.read_at(buf, off).await,
+                Self::BlockDevice(fp, _, _) => fp.read_at(buf, off).await,
+                Self::NetworkBlockDevice(cl, _) => cl
                     .read_at(off, buf)
                     .await
                     .map_err(|e| std::io::Error::other(e)),
                 Self::Memory(v) => v.read_at(buf, off).await,
+                Self::Dummy => Err(std::io::ErrorKind::NotConnected.into()),
             }
         })
     }
@@ -115,13 +119,14 @@ impl Blocks for DeviceConfiguration {
     ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
         Box::pin(async move {
             match self {
-                Self::File(fp, _) => fp.write_at(buf, off).await,
-                Self::BlockDevice(fp, _) => fp.write_at(buf, off).await,
-                Self::NetworkBlockDevice(cl) => cl
+                Self::File(fp, _, _) => fp.write_at(buf, off).await,
+                Self::BlockDevice(fp, _, _) => fp.write_at(buf, off).await,
+                Self::NetworkBlockDevice(cl, _) => cl
                     .write(off, buf)
                     .await
                     .map_err(|e| std::io::Error::other(e)),
                 Self::Memory(v) => v.write_at(buf, off).await,
+                Self::Dummy => Err(std::io::ErrorKind::NotConnected.into()),
             }
         })
     }
@@ -129,10 +134,11 @@ impl Blocks for DeviceConfiguration {
     fn size(&self) -> Pin<Box<dyn Future<Output = std::io::Result<u64>> + Send + '_>> {
         Box::pin(async move {
             match self {
-                Self::File(fp, _) => fp.size().await,
-                Self::BlockDevice(fp, _) => fp.size().await,
-                Self::NetworkBlockDevice(cl) => Ok(cl.size()),
+                Self::File(_, sz, _) => Ok(*sz),
+                Self::BlockDevice(_, sz, _) => Ok(*sz),
+                Self::NetworkBlockDevice(cl, _) => Ok(cl.size()),
                 Self::Memory(v) => v.size().await,
+                Self::Dummy => Err(std::io::ErrorKind::NotConnected.into()),
             }
         })
     }
@@ -144,7 +150,10 @@ impl DeviceConfiguration {
     }
 
     pub fn file(path: PathBuf) -> Result<Self> {
-        info!(path = path.to_string_lossy().to_string(), "Adding file backend deivce");
+        info!(
+            path = path.to_string_lossy().to_string(),
+            "Adding file backend deivce"
+        );
         let st = std::fs::metadata(&path)?;
         // File backend
         let file = std::fs::OpenOptions::new()
@@ -152,25 +161,43 @@ impl DeviceConfiguration {
             .write(true)
             .create(false)
             .open(&path)?;
-        Ok(Self::File(file.into(), st.len()))
+        Ok(Self::File(file.into(), st.len(), path))
     }
 
     pub fn block(path: PathBuf) -> Result<Self> {
-        info!(path = path.to_string_lossy().to_string(), "Adding block backend deivce");
+        info!(
+            path = path.to_string_lossy().to_string(),
+            "Adding block backend deivce"
+        );
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(false)
             .open(&path)?;
         let sz = get_device_size(&file);
-        Ok(Self::BlockDevice(file.into(), sz))
+        Ok(Self::BlockDevice(file.into(), sz, path))
+    }
+
+    pub fn dummy() -> Result<Self> {
+        info!("Adding a dummy device");
+        Ok(Self::Dummy)
     }
 
     pub async fn remote(addr: &str) -> Result<Self> {
         info!(addr, "Adding remote backend deivce");
-        let tcp = TcpStream::connect(addr).await?;
+        let tcp = tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(addr)).await??;
         let client = Client::new(tcp).await?;
-        Ok(Self::NetworkBlockDevice(client))
+        Ok(Self::NetworkBlockDevice(client, addr.to_string()))
+    }
+
+    pub async fn rebuild(&self) -> Result<Self> {
+        match self {
+            Self::Memory(_) => Err(eyre!("Memory can't be rebuilt")),
+            Self::BlockDevice(_, _, p) => Self::block(p.clone()),
+            Self::File(_, _, p) => Self::file(p.clone()),
+            Self::NetworkBlockDevice(_, addr) => Self::remote(addr).await,
+            Self::Dummy => Err(eyre!("Dummy device can't be rebuilt")),
+        }
     }
 
     pub async fn from_confs(mut confs: HashMap<String, String>) -> Result<Self> {
@@ -274,6 +301,7 @@ impl DeviceConfiguration {
                     Err(eyre!("No path given for block backend"))
                 }
             }
+            "dummy" | "d" => Self::dummy(),
             _ => Err(eyre!("Unkown device type of {}", device_type)),
         };
 

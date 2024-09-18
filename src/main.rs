@@ -1,22 +1,22 @@
 use clap::{Args, Parser, Subcommand};
-use mount::{mount_main, MountCli};
 use color_eyre::Result;
+use mount::{mount_main, MountCli};
 use read::{read_main, ReadCli};
 use server::{server_main, ServerCli};
 use tracing::info;
 
-mod mount;
 mod device;
+mod mount;
 mod nbd;
+mod parity;
 mod raid;
-mod server;
 mod read;
-
+mod server;
 #[derive(Subcommand)]
 enum Command {
     Server(ServerCli),
     Mount(MountCli),
-    Read(ReadCli)
+    Read(ReadCli),
 }
 
 #[derive(Parser)]
@@ -29,7 +29,7 @@ async fn cli_main(args: Cli) -> Result<()> {
     match args.cmd {
         Command::Server(args) => server_main(args).await,
         Command::Mount(args) => mount_main(args).await,
-        Command::Read(args) => read_main(args).await
+        Command::Read(args) => read_main(args).await,
     }
 }
 

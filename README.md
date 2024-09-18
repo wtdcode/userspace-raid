@@ -1,6 +1,6 @@
 # Userspace RAID Device (URD)
 
-Userspace RAID Device (URD) is an experimental implementation in userspace to simulate the common RAID setups.
+Userspace RAID Device (URD) is an experimental implementation (course assignment, actually) in userspace to simulate the common RAID setups.
 
 The code is strictly _not appropriate_ for any production usage.
 

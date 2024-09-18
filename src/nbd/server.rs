@@ -187,7 +187,7 @@ impl<F: Blocks + Send> Export<F> {
     ) -> core::result::Result<&'a mut [u8], ErrorType> {
         let len = len as usize;
         if buf.len() < len {
-            debug!(buflen=buf.len(), len, "Overflow in export reading");
+            debug!(buflen = buf.len(), len, "Overflow in export reading");
             return Err(ErrorType::EOVERFLOW);
         }
         let buf = &mut buf[..len];
@@ -204,7 +204,7 @@ impl<F: Blocks + Send> Export<F> {
         data: &[u8],
     ) -> core::result::Result<(), ErrorType> {
         if len > data.len() {
-            debug!(datalen=data.len(), len, "Overflow in export writing");
+            debug!(datalen = data.len(), len, "Overflow in export writing");
             return Err(ErrorType::EOVERFLOW);
         }
         let data = &data[..len];
