@@ -65,7 +65,7 @@ dd if=/dev/zero of=./test bs=2048k status=progress count=1024
 
 ### Arguments 
 
-### Device configuration
+#### Device configuration
 
 The `--device /tmp/file2` of the server arguments is a shorthand of `--device type=file,path=/tmp/file2`.
 
@@ -83,9 +83,24 @@ The full configuration is `--device type=[file|f|block|b|remote|r|memory|m][,pro
 - `remote`: `address`
 - `memory`: `size`
 
-### RAID Configuration
+#### RAID Configuration
 
 The RAID configuration has the same syntax like `--raid property=...[,property=...]` and properties includes:
 
 - RAID0: `stripe`
 
+## RAID6
+
+### Setup
+
+By default, the last two device is used as parity device. Here we present a configuration of 2 data disks with 2 parity disks.
+
+```
+bash -c 'for i in $(seq 1 5);do truncate -s 1G "/tmp/file$i"; done'
+./target/release/urd server --level 6 \
+        --raid stripe=1024 \
+        --device /tmp/file1 \
+        --device /tmp/file2 \
+        --device /tmp/file3 \
+        --device /tmp/file4
+```

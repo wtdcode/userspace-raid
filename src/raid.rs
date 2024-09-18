@@ -570,23 +570,18 @@ impl RAID {
 impl Blocks for RAID {
     fn flush(&self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
         Box::pin(async move {
-            match &self.config {
-                RaidConfiguration::RAID0 { stripe: _ } => {
-                    // Flush all
-                    let mut js = JoinSet::new();
+            // Flush all
+            let mut js = JoinSet::new();
 
-                    for dev in self.devices.clone().into_iter() {
-                        js.spawn(async move { dev.flush().await });
-                    }
-
-                    while let Some(t) = js.join_next().await {
-                        let _ = t??;
-                    }
-
-                    Ok(())
-                }
-                _ => Err(std::io::Error::other("Not implemented yet")),
+            for dev in self.devices.clone().into_iter() {
+                js.spawn(async move { dev.flush().await });
             }
+
+            while let Some(t) = js.join_next().await {
+                let _ = t??;
+            }
+
+            Ok(())
         })
     }
 
@@ -598,6 +593,7 @@ impl Blocks for RAID {
         Box::pin(async move {
             match &self.config {
                 RaidConfiguration::RAID0 { stripe } => self.raid0_read_at(buf, off, *stripe).await,
+                RaidConfiguration::RAID6 { stripe } => self.raid6_read_at(buf, off, *stripe).await,
                 _ => Err(std::io::Error::other("Not implemented yet")),
             }
         })
@@ -611,6 +607,7 @@ impl Blocks for RAID {
         Box::pin(async move {
             match &self.config {
                 RaidConfiguration::RAID0 { stripe } => self.raid0_write_at(buf, off, *stripe).await,
+                RaidConfiguration::RAID6 { stripe } => self.raid6_write_at(buf, off, *stripe).await,
                 _ => Err(std::io::Error::other("Not implemented yet")),
             }
         })
