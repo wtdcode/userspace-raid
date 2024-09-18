@@ -646,11 +646,15 @@ impl RAID {
                                 .enumerate()
                                 .filter(|t| t.0 != first_parity && t.0 != second_parity)
                                 .fold(vec![0u8; stripe], |acc, x| {
-                                    if let Some(x) = x.1 {
-                                        acc.into_iter().zip(x).map(|(a, b)| a ^ b).collect_vec()
+                                    let x = if let Some(x) = x.1 {
+                                        x.clone()
                                     } else {
-                                        acc
-                                    }
+                                        vec![0u8; stripe]
+                                    };
+                                    acc.into_iter()
+                                        .zip(x.into_iter())
+                                        .map(|(a, b)| a ^ b)
+                                        .collect_vec()
                                 });
 
                             let mut qxy = vec![0u8; stripe];
