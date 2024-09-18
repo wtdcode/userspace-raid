@@ -14,10 +14,10 @@ pub struct TestCli {
     #[arg(long, default_value = "127.0.0.1:10844")]
     host: String,
 
-    #[arg(short, long, default_value = "/dev/nbd0")]
+    #[arg(long, default_value = "0")]
     offset: u64,
 
-    #[arg(short, long)]
+    #[arg(short, long, default_value = "0")]
     size: u32,
 
     #[arg(short, long, default_value = "-")]
