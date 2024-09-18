@@ -29,10 +29,16 @@ and mixing these backends freely.
 
 ### Build
 
-Obtain rust toolchain and:
+Obtain rust toolchain via https://rustup.rs and:
 
 ```
 cargo build --release
+```
+
+Additonally you may need:
+
+```
+apt install build-essential -y
 ```
 
 ### Quick Setup
