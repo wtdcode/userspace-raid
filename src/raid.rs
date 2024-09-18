@@ -182,12 +182,16 @@ impl RAID {
         })
     }
 
-
     pub async fn rebuild(&mut self) -> Result<()> {
         if self.devices.iter().any(|t| t.need_rebuild()) {
             info!("We are going to rebuilding!");
 
-            let stride = 1024.min(self.size);
+            let stride = match self.config {
+                RaidConfiguration::RAID6 { stripe } => (self.devices.len() - 2) * stripe,
+                _ => {
+                    return Err(eyre!("Rebuilding not supported for this RAID"));
+                }
+            };
             let mut buf = vec![0u8; stride];
             let mut off = 0;
 
@@ -898,7 +902,11 @@ impl RAID {
         // Try to get known buffers
         for (other_idx, other_req) in bufs.iter().enumerate() {
             let successful_req = request[other_idx];
-            trace!(successful_req.lhs_in_device, lhs_in_device, "raid6_retrieve_bufs");
+            trace!(
+                successful_req.lhs_in_device,
+                lhs_in_device,
+                "raid6_retrieve_bufs"
+            );
             if successful_req.lhs_in_device == lhs_in_device {
                 if let Some(other_req) = other_req {
                     debug!(
