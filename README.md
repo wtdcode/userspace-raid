@@ -147,4 +147,4 @@ To rebuild any disks, we can have:
         --device /tmp/file4
 ```
 
-Rebuilding actually sets the target devce as "write-only" status and then reads the whole device. Since the target device is not readable, this will trigger the recovery mechanism. Then, the data will be written to all data disks as usual.
+Rebuilding actually sets the target devce as "write-only" status and then reads the whole RAID array. Since the target device is not readable, this will trigger the recovery mechanism. Then, the data will be written to all data disks as usual.
