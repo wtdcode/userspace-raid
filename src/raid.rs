@@ -252,7 +252,7 @@ impl RAID {
             let rhs = (((lhs / stripe) + 1) * stripe).min(len + off as usize);
 
             let (lhs_in_device, rhs_in_device) =
-                Self::striped_off_to_device(off, len + off - lhs, stripe, devices);
+                Self::striped_off_to_device(lhs, len + off - lhs, stripe, devices);
 
             if rhs_in_device - lhs_in_device != rhs - lhs {
                 warn!(
