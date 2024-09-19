@@ -94,6 +94,7 @@ The full configuration is `--device type=[file|f|block|b|remote|r|memory|m|d|dum
 The RAID configuration has the same syntax like `--raid property=...[,property=...]` and properties includes:
 
 - RAID0: `stripe`
+- RAID6: `stripe`
 
 ## RAID6
 
