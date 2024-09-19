@@ -41,7 +41,7 @@ Additonally you may need:
 apt install build-essential -y
 ```
 
-### Quick Setup
+### Quick Usage
 
 Server side:
 
@@ -129,8 +129,21 @@ RAID6 can have a maximum of 2 device fault toleration, that is:
 ```
 ./target/release/urd server --level 6 \
         --raid stripe=1024 \
-        --device type=dummy \ # Note all data disk are faulty!
+        --device type=dummy \ # Note all data disks are faulty!
         --device type=dummy \
         --device /tmp/file3 \
         --device /tmp/file4
 ```
+
+To rebuild any disks, we can have:
+
+```
+./target/release/urd server --level 6 \
+        --raid stripe=1024 \
+        --device /tmp/file1 \
+        --device /tmp/file5,rebuild \ # Note this is the disk to rebuild
+        --device /tmp/file3 \
+        --device /tmp/file4
+```
+
+Rebuilding actually sets the target devce as "write-only" status and then reads the whole device. Since the target device is not readable, this will trigger the recovery mechanism. Then, the data will be written to all data disks as usual.
