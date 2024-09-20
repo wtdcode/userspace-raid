@@ -186,7 +186,7 @@ impl RAID {
         let mut rebuilt = false;
         if self.devices.iter().any(|t| t.need_rebuild()) {
             info!("We are going to rebuilding!");
-
+            let check = self.devices.iter().any(|t| t.need_check());
             let stride = match self.config {
                 RaidConfiguration::RAID6 { stripe } => (self.devices.len() - 2) * stripe,
                 _ => {
@@ -202,7 +202,9 @@ impl RAID {
                 }
 
                 self.read_at(&mut buf, off as u64).await?;
-                self.write_at(&buf, off as u64).await?;
+                if check {
+                    self.write_at(&buf, off as u64).await?;
+                }
 
                 off += stride;
                 rebuilt = true;

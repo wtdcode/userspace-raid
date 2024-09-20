@@ -75,7 +75,7 @@ pub enum DeviceConfiguration {
     File(File, u64, PathBuf),
     BlockDevice(File, u64, PathBuf),
     NetworkBlockDevice(Client<TcpStream>, String),
-    RebuildingDevice(Box<DeviceConfiguration>, bool),
+    RebuildingDevice(Box<DeviceConfiguration>, bool, bool),
     Dummy,
 }
 
@@ -89,7 +89,7 @@ impl Blocks for DeviceConfiguration {
                     cl.flush().await.map_err(|e| std::io::Error::other(e))
                 }
                 Self::Memory(m) => m.flush().await,
-                Self::RebuildingDevice(dev, _) => {
+                Self::RebuildingDevice(dev, _, _) => {
                     dev.flush().await.map_err(|e| std::io::Error::other(e))
                 }
                 Self::Dummy => Err(std::io::ErrorKind::NotConnected.into()),
@@ -111,7 +111,7 @@ impl Blocks for DeviceConfiguration {
                     .await
                     .map_err(|e| std::io::Error::other(e)),
                 Self::Memory(v) => v.read_at(buf, off).await,
-                Self::RebuildingDevice(dev, rebuild) => {
+                Self::RebuildingDevice(dev, rebuild, _) => {
                     if *rebuild {
                         Err(std::io::ErrorKind::NotConnected.into())
                     } else {
@@ -138,7 +138,7 @@ impl Blocks for DeviceConfiguration {
                     .write(off, buf)
                     .await
                     .map_err(|e| std::io::Error::other(e)),
-                Self::RebuildingDevice(dev, _) => dev
+                Self::RebuildingDevice(dev, _, _) => dev
                     .write_at(buf, off)
                     .await
                     .map_err(|e| std::io::Error::other(e)),
@@ -155,7 +155,7 @@ impl Blocks for DeviceConfiguration {
                 Self::BlockDevice(_, sz, _) => Ok(*sz),
                 Self::NetworkBlockDevice(cl, _) => Ok(cl.size()),
                 Self::Memory(v) => v.size().await,
-                Self::RebuildingDevice(dev, _) => dev.size().await,
+                Self::RebuildingDevice(dev, _, _) => dev.size().await,
                 Self::Dummy => Err(std::io::ErrorKind::NotConnected.into()),
             }
         })
@@ -163,17 +163,25 @@ impl Blocks for DeviceConfiguration {
 }
 
 impl DeviceConfiguration {
+    pub fn need_check(&self) -> bool {
+        match self {
+            Self::RebuildingDevice(_, rebuild, check) => *check,
+            _ => false,
+        }
+    }
+
     pub fn need_rebuild(&self) -> bool {
         match self {
-            Self::RebuildingDevice(_, rebuild) => *rebuild,
+            Self::RebuildingDevice(_, rebuild, check) => *rebuild || *check,
             _ => false,
         }
     }
 
     pub fn rebuild_down(&mut self) {
         match self {
-            Self::RebuildingDevice(_, rebuild) => {
+            Self::RebuildingDevice(_, rebuild, check) => {
                 *rebuild = false;
+                *check = false;
             }
             _ => {}
         }
@@ -225,7 +233,9 @@ impl DeviceConfiguration {
     }
 
     pub async fn from_confs(mut confs: HashMap<String, String>) -> Result<Self> {
-        let rebuild = confs.remove("rebuild").map(|_| true).unwrap_or(false);
+        let mut rebuild = confs.remove("rebuild").map(|_| true).unwrap_or(false);
+        let check = confs.remove("check").map(|_| true).unwrap_or(false);
+        rebuild = rebuild || check;
         let mut arr: Vec<(String, String)> = confs.clone().into_iter().collect();
 
         // Check shorthands
@@ -262,7 +272,7 @@ impl DeviceConfiguration {
                     )),
                 };
                 if rebuild {
-                    return Ok(Self::RebuildingDevice(Box::new(dev?), true));
+                    return Ok(Self::RebuildingDevice(Box::new(dev?), true, check));
                 } else {
                     return dev;
                 }
@@ -271,7 +281,11 @@ impl DeviceConfiguration {
                 if let Ok(sz) = parse_size(&s) {
                     info!("Inferred as memory backend, size = {}", sz);
                     if rebuild {
-                        return Ok(Self::RebuildingDevice(Box::new(Self::memory(sz)), true));
+                        return Ok(Self::RebuildingDevice(
+                            Box::new(Self::memory(sz)),
+                            true,
+                            check,
+                        ));
                     } else {
                         return Ok(Self::memory(sz));
                     }
@@ -283,6 +297,7 @@ impl DeviceConfiguration {
                         return Ok(Self::RebuildingDevice(
                             Box::new(Self::remote(&s).await?),
                             true,
+                            check,
                         ));
                     } else {
                         return Self::remote(&s).await;
@@ -353,7 +368,7 @@ impl DeviceConfiguration {
         }
 
         if rebuild {
-            return Ok(Self::RebuildingDevice(Box::new(ret?), true));
+            return Ok(Self::RebuildingDevice(Box::new(ret?), true, check));
         } else {
             return ret;
         }
