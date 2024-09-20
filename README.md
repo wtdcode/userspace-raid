@@ -120,7 +120,7 @@ To emulate a faulty device, simply use `dummy` device
 ./target/release/urd server --level 6 \
         --raid stripe=1024 \
         --device /tmp/file1 \
-        --device dummy \ # Note this is the faulty device!
+        --device type=dummy \ # Note this is the faulty device!
         --device /tmp/file3 \
         --device /tmp/file4
 ```

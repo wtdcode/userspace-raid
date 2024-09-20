@@ -229,7 +229,9 @@ impl DeviceConfiguration {
         let mut arr: Vec<(String, String)> = confs.clone().into_iter().collect();
 
         // Check shorthands
-        if arr.len() == 1 && arr[0].1.len() == 0 {
+        if arr.len() == 1 && arr[0].1.to_lowercase() == "dummy" {
+            return Ok(Self::Dummy);
+        } else if arr.len() == 1 && arr[0].1.len() == 0 {
             // First check if it is a valid path as shorthand
             let s = arr.pop().unwrap().0;
 
