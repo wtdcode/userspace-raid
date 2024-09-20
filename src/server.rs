@@ -42,7 +42,10 @@ pub async fn server_main(args: ServerCli) -> Result<()> {
 
     let mut blocks = RAID::new(devices, raid).await?;
 
-    blocks.rebuild().await?;
+    if blocks.rebuild().await? {
+        info!("Rebuild done, exiting...");
+        return Ok(());
+    }
 
     info!("Our server is {:?}", &blocks);
     let server = Server::new(blocks);

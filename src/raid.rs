@@ -182,7 +182,8 @@ impl RAID {
         })
     }
 
-    pub async fn rebuild(&mut self) -> Result<()> {
+    pub async fn rebuild(&mut self) -> Result<bool> {
+        let mut rebuilt = false;
         if self.devices.iter().any(|t| t.need_rebuild()) {
             info!("We are going to rebuilding!");
 
@@ -204,13 +205,14 @@ impl RAID {
                 self.write_at(&buf, off as u64).await?;
 
                 off += stride;
+                rebuilt = true;
             }
         }
 
         for dev in self.devices.iter_mut() {
             Arc::get_mut(dev).unwrap().rebuild_down();
         }
-        Ok(())
+        Ok(rebuilt)
     }
 
     // RAID0
