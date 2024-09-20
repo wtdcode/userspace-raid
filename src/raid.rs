@@ -202,7 +202,7 @@ impl RAID {
                 }
 
                 self.read_at(&mut buf, off as u64).await?;
-                if check {
+                if !check {
                     self.write_at(&buf, off as u64).await?;
                 }
 
