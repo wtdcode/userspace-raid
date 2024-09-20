@@ -14,8 +14,6 @@ Most modern Linux distributions shall have `NBD` shipped out-of-box, just enable
 modprobe nbd
 ```
 
-No other software is needed.
-
 ### Backends
 
 URD supports a variety of backends including:
